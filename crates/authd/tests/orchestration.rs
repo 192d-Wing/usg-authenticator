@@ -99,7 +99,29 @@ fn config_rejects_no_ports_dupes_and_empties() {
         io_timeout_secs: 0,
         ..base.clone()
     };
-    assert_eq!(zero.validate(), Err(ConfigError::ZeroTimeout));
+    assert_eq!(zero.validate(), Err(ConfigError::BadTimeout));
+
+    let too_long = AuthdConfig {
+        io_timeout_secs: 9999,
+        ports: vec![PortConfig {
+            name: "E1".into(),
+            pae: PaeConfig::default(),
+        }],
+        ..base.clone()
+    };
+    assert_eq!(too_long.validate(), Err(ConfigError::BadTimeout));
+
+    // A non-host:port server_addr is rejected.
+    let mut bad_addr = base.clone();
+    bad_addr.radius.server_addr = "not-a-socket".into();
+    bad_addr.ports = vec![PortConfig {
+        name: "E1".into(),
+        pae: PaeConfig::default(),
+    }];
+    assert!(matches!(
+        bad_addr.validate(),
+        Err(ConfigError::BadServerAddr(_))
+    ));
 
     let mut empty_field = base.clone();
     empty_field.radius.server_name = String::new();
@@ -138,9 +160,9 @@ fn timer_durations_map_from_config_except_session_timeout() {
 // ---- RADIUS session correlation ----
 
 /// Seal a reply like the server: M-A (with the request authenticator) then the
-/// Response Authenticator.
-fn seal_reply(code: Code, attrs: Vec<Attribute>, req_auth: &[u8; 16]) -> Packet {
-    let mut p = Packet::new(code, 0, [0u8; 16]);
+/// Response Authenticator. `id` is the Identifier the reply echoes.
+fn seal_reply(code: Code, id: u8, attrs: Vec<Attribute>, req_auth: &[u8; 16]) -> Packet {
+    let mut p = Packet::new(code, id, [0u8; 16]);
     for a in attrs {
         p.add_attribute(a);
     }
@@ -169,9 +191,10 @@ fn session_builds_request_echoes_state_and_verifies_reply() {
     assert_eq!(req.identifier, 0);
     assert!(req.find_attribute(24).is_none()); // no State on the first request
 
-    // Server challenges with a State.
+    // Server challenges with a State (reply echoes the request Identifier, 0).
     let challenge = seal_reply(
         Code::AccessChallenge,
+        0,
         vec![
             Attribute::new(79, vec![1, 2, 0, 6, 13, 0]).unwrap(),
             Attribute::new(24, b"sess-state".to_vec()).unwrap(),
@@ -181,28 +204,49 @@ fn session_builds_request_echoes_state_and_verifies_reply() {
     let ev = s.handle_reply(&challenge, SECRET).unwrap();
     assert!(matches!(ev, Event::AccessChallenge { .. }));
 
-    // Next request echoes the State and uses the next Identifier.
+    // Next request echoes the State, uses the next Identifier, and RESENDS the
+    // first-round identity as User-Name even though this round carries none.
     let req2 = s
         .build_eap_request(&ctx(), None, &[2, 2, 0, 6, 13, 0], [0x11; 16], SECRET)
         .unwrap();
     assert_eq!(req2.identifier, 1);
     assert_eq!(req2.find_attribute(24).unwrap().value, b"sess-state");
+    assert_eq!(
+        req2.find_attribute(AttributeType::UserName as u8)
+            .unwrap()
+            .value,
+        b"alice"
+    );
+}
+
+#[test]
+fn session_rejects_reply_with_mismatched_identifier() {
+    let mut s = RadiusSession::new();
+    s.build_eap_request(&ctx(), Some(b"x"), &[2, 1, 0, 5, 1], REQ_AUTH, SECRET)
+        .unwrap(); // request Identifier 0
+    // A reply (validly sealed) but carrying a different Identifier must be rejected.
+    let wrong_id = seal_reply(Code::AccessAccept, 7, vec![], &REQ_AUTH);
+    assert!(matches!(
+        s.handle_reply(&wrong_id, SECRET),
+        Err(AuthdError::ReplyVerificationFailed)
+    ));
 }
 
 #[test]
 fn session_rejects_forged_reply_and_missing_pending() {
     let mut s = RadiusSession::new();
     // No request outstanding.
-    let accept = seal_reply(Code::AccessAccept, vec![], &REQ_AUTH);
+    let accept = seal_reply(Code::AccessAccept, 0, vec![], &REQ_AUTH);
     assert!(matches!(
         s.handle_reply(&accept, SECRET),
         Err(AuthdError::NoPendingRequest)
     ));
 
-    // Build a request, then reply sealed with the WRONG authenticator.
+    // Build a request (Identifier 0), then a reply with the matching Identifier
+    // but the WRONG authenticator.
     s.build_eap_request(&ctx(), Some(b"x"), &[2, 1, 0, 5, 1], REQ_AUTH, SECRET)
         .unwrap();
-    let forged = seal_reply(Code::AccessAccept, vec![], &[0u8; 16]);
+    let forged = seal_reply(Code::AccessAccept, 0, vec![], &[0u8; 16]);
     assert!(matches!(
         s.handle_reply(&forged, SECRET),
         Err(AuthdError::ReplyVerificationFailed)
@@ -244,6 +288,7 @@ impl AuthServer for MockServer {
         ];
         Ok(seal_reply(
             Code::AccessAccept,
+            request.identifier,
             attrs,
             &request.authenticator,
         ))

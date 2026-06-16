@@ -17,16 +17,22 @@ use radius_proto::Packet;
 /// The in-flight request awaiting a reply, kept so the reply can be bound to it.
 #[derive(Debug, Clone, Copy)]
 struct Pending {
+    identifier: u8,
     request_authenticator: [u8; 16],
 }
 
 /// RADIUS correlation state for one supplicant session.
 #[derive(Debug, Default)]
 pub struct RadiusSession {
-    /// Next RADIUS Identifier to use (wraps).
+    /// Next RADIUS Identifier for Access-Requests (wraps).
     next_id: u8,
+    /// Next RADIUS Identifier for Accounting-Requests (separate id space).
+    next_acct_id: u8,
     /// The server's last `State`, echoed in the next Access-Request.
     last_state: Option<Vec<u8>>,
+    /// The identity (`User-Name`) seen on the first round, resent every round so
+    /// the server can key policy on it across the whole conversation.
+    user_name: Option<Vec<u8>>,
     /// The outstanding request, if any.
     pending: Option<Pending>,
     /// `Class` from the last Access-Accept, echoed in accounting.
@@ -46,10 +52,17 @@ impl RadiusSession {
         self.class.as_deref()
     }
 
-    /// Allocate the next RADIUS Identifier (wraps at 256).
+    /// Allocate the next Access-Request Identifier (wraps at 256).
     pub fn next_identifier(&mut self) -> u8 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
+        id
+    }
+
+    /// Allocate the next Accounting-Request Identifier (separate id space).
+    pub fn next_accounting_identifier(&mut self) -> u8 {
+        let id = self.next_acct_id;
+        self.next_acct_id = self.next_acct_id.wrapping_add(1);
         id
     }
 
@@ -67,15 +80,22 @@ impl RadiusSession {
         request_authenticator: [u8; 16],
         secret: &[u8],
     ) -> Result<Packet, AuthdError> {
-        let id = self.next_identifier();
+        // Remember the identity from the round that carries one, and resend it on
+        // every Access-Request so the server can key policy on `User-Name`
+        // throughout the conversation (challenge rounds carry no identity).
+        if let Some(id) = identity {
+            self.user_name = Some(id.to_vec());
+        }
+        let identifier = self.next_identifier();
         self.pending = Some(Pending {
+            identifier,
             request_authenticator,
         });
         access_request_eap(
             ctx,
-            id,
+            identifier,
             request_authenticator,
-            identity,
+            self.user_name.as_deref(),
             self.last_state.as_deref(),
             eap,
             secret,
@@ -93,11 +113,13 @@ impl RadiusSession {
         request_authenticator: [u8; 16],
         secret: &[u8],
     ) -> Result<Packet, AuthdError> {
-        let id = self.next_identifier();
+        let identifier = self.next_identifier();
         self.pending = Some(Pending {
+            identifier,
             request_authenticator,
         });
-        access_request_mab(ctx, id, request_authenticator, secret).map_err(AuthdError::Radius)
+        access_request_mab(ctx, identifier, request_authenticator, secret)
+            .map_err(AuthdError::Radius)
     }
 
     /// Verify a reply against the outstanding request, parse it into the PAE
@@ -109,6 +131,11 @@ impl RadiusSession {
     /// - [`AuthdError::Radius`] if the reply cannot be parsed.
     pub fn handle_reply(&mut self, reply: &Packet, secret: &[u8]) -> Result<Event, AuthdError> {
         let pending = self.pending.take().ok_or(AuthdError::NoPendingRequest)?;
+        // Bind the reply to the outstanding request by Identifier (RFC 2865 §3) at
+        // this layer, not relying solely on the transport to check it.
+        if reply.identifier != pending.identifier {
+            return Err(AuthdError::ReplyVerificationFailed);
+        }
         if !verify_reply(reply, &pending.request_authenticator, secret) {
             return Err(AuthdError::ReplyVerificationFailed);
         }
