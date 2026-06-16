@@ -84,6 +84,17 @@ impl EapType {
     }
 }
 
+/// Build an EAP-Request/Identity packet (RFC 3748 §5.1) with the given
+/// Identifier. This is the one EAP packet the pass-through authenticator
+/// originates; every other EAP packet is relayed verbatim from the server.
+///
+/// The layout is fixed at 5 octets: `Code(1)=Request | Identifier | Length(2)=5
+/// | Type(1)=Identity`, with no Type-Data.
+#[must_use]
+pub fn request_identity(identifier: u8) -> [u8; MIN_REQUEST_RESPONSE_LEN] {
+    [1, identifier, 0, 5, 1]
+}
+
 /// A decoded EAP packet header with borrowed type-data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EapPacket<'a> {
