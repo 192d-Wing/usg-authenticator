@@ -128,6 +128,14 @@ pub struct PortSetup {
 /// port (via the enforcer) before servicing it and decodes inbound EAPOL into
 /// PAE events; timer expiries arrive over an internal channel.
 ///
+/// **Known limitation (v1):** the loop awaits each RADIUS round-trip inline, so
+/// on a multi-auth port a slow/unreachable server head-of-line-blocks the other
+/// supplicants and their timers until the RadSec `io_timeout` elapses. The
+/// remedy — spawning each session's RADIUS exchange as a task that feeds its
+/// reply back over the timer channel — is deferred to the integration milestone
+/// (it needs the live transport to validate). The bounded `io_timeout` caps the
+/// stall.
+///
 /// # Errors
 /// Propagates the first fatal boundary error (trap install, socket open, etc.).
 pub async fn run_port<E>(

@@ -141,9 +141,10 @@ impl Orchestrator {
         E::Error: core::fmt::Display,
         C: Scheduler,
     {
-        let mut queue = vec![(mac, event)];
+        // FIFO so follow-up events are processed in the order they were produced.
+        let mut queue = std::collections::VecDeque::from([(mac, event)]);
         let mut steps = 0u32;
-        while let Some((m, ev)) = queue.pop() {
+        while let Some((m, ev)) = queue.pop_front() {
             // Safety bound: a healthy exchange resolves in a few steps; this
             // stops any pathological feedback loop.
             steps = steps.saturating_add(1);
@@ -155,7 +156,7 @@ impl Orchestrator {
                 if let Some(follow) = self.dispatch(de, deps).await? {
                     // A RADIUS reply follow-up belongs to the session that
                     // triggered the request.
-                    queue.push((de_mac.unwrap_or(m), follow));
+                    queue.push_back((de_mac.unwrap_or(m), follow));
                 }
             }
         }
@@ -247,8 +248,9 @@ impl Orchestrator {
                 Ok(None)
             }
             Effect::ArmTimer(kind) => {
-                if let Some(mac) = de.mac {
-                    let dur = self.timer_duration(mac, kind, deps.timers);
+                if let Some(mac) = de.mac
+                    && let Some(dur) = self.timer_duration(mac, kind, deps.timers)
+                {
                     deps.scheduler.arm(mac, kind, dur);
                 }
                 Ok(None)
@@ -275,19 +277,18 @@ impl Orchestrator {
     }
 
     /// Resolve a timer duration: config-backed kinds from [`Timers`], and
-    /// `SessionTimeout` from the session's RADIUS `Session-Timeout` (default 0
-    /// if absent, which fires immediately — a safe upper bound).
-    fn timer_duration(&self, mac: MacAddr, kind: TimerKind, timers: &Timers) -> Duration {
+    /// `SessionTimeout` from the session's RADIUS `Session-Timeout`. Returns
+    /// `None` for a `SessionTimeout` with no per-session value so the caller
+    /// does **not** arm a 0-second (immediate-fire) timer.
+    fn timer_duration(&self, mac: MacAddr, kind: TimerKind, timers: &Timers) -> Option<Duration> {
         if let Some(dur) = timers::duration(timers, kind) {
-            return dur;
+            return Some(dur);
         }
-        // SessionTimeout: use the per-session value.
-        let secs = self
-            .sessions
+        // SessionTimeout: only arm if the session actually carries a value.
+        self.sessions
             .get(&mac)
             .and_then(|s| s.session_timeout)
-            .unwrap_or(0);
-        Duration::from_secs(u64::from(secs))
+            .map(|secs| Duration::from_secs(u64::from(secs)))
     }
 
     async fn send_accounting<S, A, E, C>(
@@ -302,7 +303,7 @@ impl Orchestrator {
         let ctx = self.ctx_for(mac);
         let acct_id = self.acct_id_for(mac);
         let session = self.session(mac);
-        let id = session.radius.next_identifier();
+        let id = session.radius.next_accounting_identifier();
         let request = session
             .radius
             .build_accounting(&ctx, id, trigger, &acct_id, deps.secret)?;

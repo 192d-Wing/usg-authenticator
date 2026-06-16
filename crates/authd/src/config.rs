@@ -46,9 +46,15 @@ pub enum ConfigError {
     DuplicatePort(String),
     /// A required field was empty.
     EmptyField(&'static str),
-    /// `io_timeout_secs` was zero.
-    ZeroTimeout,
+    /// `io_timeout_secs` was zero or above the cap.
+    BadTimeout,
+    /// `server_addr` is not a `host:port` with a valid port.
+    BadServerAddr(String),
 }
+
+/// Upper bound on `io_timeout_secs` — a fat-fingered value must not let a single
+/// RADIUS round-trip block a port for minutes.
+const MAX_IO_TIMEOUT_SECS: u64 = 120;
 
 impl core::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -56,7 +62,10 @@ impl core::fmt::Display for ConfigError {
             Self::NoPorts => write!(f, "no ports configured"),
             Self::DuplicatePort(p) => write!(f, "duplicate port {p:?}"),
             Self::EmptyField(field) => write!(f, "required field {field} is empty"),
-            Self::ZeroTimeout => write!(f, "io_timeout_secs must be non-zero"),
+            Self::BadTimeout => {
+                write!(f, "io_timeout_secs must be in 1..={MAX_IO_TIMEOUT_SECS}")
+            }
+            Self::BadServerAddr(a) => write!(f, "server_addr {a:?} is not host:port"),
         }
     }
 }
@@ -70,11 +79,17 @@ impl AuthdConfig {
     /// # Errors
     /// A [`ConfigError`] describing the first problem found.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.io_timeout_secs == 0 {
-            return Err(ConfigError::ZeroTimeout);
+        if self.io_timeout_secs == 0 || self.io_timeout_secs > MAX_IO_TIMEOUT_SECS {
+            return Err(ConfigError::BadTimeout);
         }
         if self.radius.server_addr.is_empty() {
             return Err(ConfigError::EmptyField("radius.server_addr"));
+        }
+        // Require `host:port` with a parseable, non-zero port.
+        match self.radius.server_addr.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p != 0) => {
+            }
+            _ => return Err(ConfigError::BadServerAddr(self.radius.server_addr.clone())),
         }
         if self.radius.server_name.is_empty() {
             return Err(ConfigError::EmptyField("radius.server_name"));
