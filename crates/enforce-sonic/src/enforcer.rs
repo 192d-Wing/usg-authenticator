@@ -1,6 +1,10 @@
-//! [`SonicEnforcer`]: the [`enforce::Enforcer`] over a SONiC [`DbConn`]. It keeps
-//! the last-applied posture per `{port, target}`, plans the minimal transition,
-//! applies it, and confirms the change landed before reporting success.
+//! [`SonicEnforcer`]: the [`enforce::Enforcer`] over a SONiC [`DbConn`].
+//!
+//! It keeps the last-applied posture per **port** (SONiC v1 authorization is
+//! port-level — see [`crate::schema`]), plans the minimal transition, applies
+//! it, and confirms the change landed before reporting success. The [`Target`]
+//! is accepted for trait conformance; per-MAC dataplane isolation is a
+//! documented limitation, so all targets on a port share one posture.
 
 use crate::db::{Db, DbConn};
 use crate::error::SonicError;
@@ -14,8 +18,8 @@ use std::sync::Mutex;
 #[derive(Debug)]
 pub struct SonicEnforcer<C> {
     conn: C,
-    /// Last posture applied per `{port, target}`, so transitions emit only deltas.
-    applied: Mutex<HashMap<(String, Target), Desired>>,
+    /// Last posture applied per port, so transitions emit only deltas.
+    applied: Mutex<HashMap<String, Desired>>,
 }
 
 impl<C: DbConn> SonicEnforcer<C> {
@@ -28,23 +32,22 @@ impl<C: DbConn> SonicEnforcer<C> {
         }
     }
 
-    fn previous(&self, port: &str, target: Target) -> Desired {
+    fn previous(&self, port: &str) -> Desired {
         self.applied
             .lock()
             .ok()
-            .and_then(|m| m.get(&(port.to_string(), target)).cloned())
+            .and_then(|m| m.get(port).cloned())
             .unwrap_or_default()
     }
 
-    fn remember(&self, port: &str, target: Target, desired: Desired) {
+    fn remember(&self, port: &str, desired: Desired) {
         if let Ok(mut m) = self.applied.lock() {
-            m.insert((port.to_string(), target), desired);
+            m.insert(port.to_string(), desired);
         }
     }
 
-    /// Confirm a key exists in `db`, mapping a negative result to a fail-closed
-    /// [`SonicError::Unconfirmed`].
-    async fn require(&self, db: Db, key: String) -> Result<(), SonicError<C::Error>> {
+    /// Require `key` to exist in `db`, else fail closed.
+    async fn require_present(&self, db: Db, key: String) -> Result<(), SonicError<C::Error>> {
         if self
             .conn
             .confirm(db, &key)
@@ -56,41 +59,86 @@ impl<C: DbConn> SonicEnforcer<C> {
             Err(SonicError::Unconfirmed { db, key })
         }
     }
+
+    /// Require `key` to be absent in `db` (e.g. the deny rule is gone, i.e. the
+    /// port is genuinely open), else fail closed.
+    async fn require_absent(&self, db: Db, key: String) -> Result<(), SonicError<C::Error>> {
+        if self
+            .conn
+            .confirm(db, &key)
+            .await
+            .map_err(SonicError::Backend)?
+        {
+            Err(SonicError::Unconfirmed { db, key })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl<C: DbConn> Enforcer for SonicEnforcer<C> {
     type Error = SonicError<C::Error>;
 
-    async fn ensure_eapol_trap(&self, _port: &str) -> Result<(), Self::Error> {
-        let ops = schema::plan_eapol_trap();
+    /// Bring a port into 802.1X service: install the EAPOL trap **and** close the
+    /// controlled port, so it is never open before it authenticates (fail
+    /// closed). Confirms both landed.
+    async fn ensure_eapol_trap(&self, port: &str) -> Result<(), Self::Error> {
+        let mut ops = schema::plan_eapol_trap();
+        ops.extend(schema::plan_close(port));
         self.conn.apply(&ops).await.map_err(SonicError::Backend)?;
-        self.require(Db::Config, schema::EAPOL_TRAP_KEY.to_string())
-            .await
+        self.require_present(Db::Config, schema::EAPOL_TRAP_KEY.to_string())
+            .await?;
+        self.require_present(Db::Config, schema::deny_rule_key(port))
+            .await?;
+        self.remember(port, Desired::default());
+        Ok(())
     }
 
     async fn apply(
         &self,
         port: &str,
-        target: Target,
+        _target: Target,
         auth: &PortAuthorization,
     ) -> Result<(), Self::Error> {
         let new = Desired::from_authorization(auth);
-        let old = self.previous(port, target);
-        let ops = schema::transition(port, target, &old, &new);
+
+        // Fail closed on a VLAN we cannot program as a SONiC VLAN id.
+        if let Some(vlan) = &new.vlan
+            && !schema::is_valid_vlan(vlan)
+        {
+            return Err(SonicError::InvalidVlan(vlan.clone()));
+        }
+        // Fail closed if the requested Filter-Id ACL is not provisioned on the
+        // switch (SERVER-CONTRACT §3.2): confirm the named table exists first.
+        if let Some(filter) = &new.filter_id {
+            self.require_present(Db::Config, format!("ACL_TABLE|{filter}"))
+                .await?;
+        }
+
+        let old = self.previous(port);
+        let ops = schema::transition(port, &old, &new);
         self.conn.apply(&ops).await.map_err(SonicError::Backend)?;
 
         // Confirm the load-bearing change landed before recording success.
         if new.authorized {
-            if let Some(vlan) = &new.vlan {
-                self.require(Db::Config, schema::vlan_member_key(vlan, port))
-                    .await?;
+            match &new.vlan {
+                Some(vlan) => {
+                    self.require_present(Db::Config, schema::vlan_member_key(vlan, port))
+                        .await?;
+                }
+                // No VLAN to confirm — instead confirm the port is genuinely open
+                // (the default-deny rule is gone), never just assume.
+                None => {
+                    self.require_absent(Db::Config, schema::deny_rule_key(port))
+                        .await?;
+                }
             }
         } else {
-            self.require(Db::Config, schema::deny_rule_key(port, target))
+            self.require_present(Db::Config, schema::deny_rule_key(port))
                 .await?;
         }
 
-        self.remember(port, target, new);
+        self.remember(port, new);
         Ok(())
     }
 }

@@ -16,6 +16,9 @@ pub enum SonicError<E> {
         /// The key that was expected to exist.
         key: String,
     },
+    /// The server assigned a VLAN that is not a programmable SONiC VLAN id
+    /// (non-numeric name, or out of 1..=4094). Fail closed — we do not guess.
+    InvalidVlan(String),
 }
 
 impl<E: core::fmt::Display> core::fmt::Display for SonicError<E> {
@@ -24,6 +27,9 @@ impl<E: core::fmt::Display> core::fmt::Display for SonicError<E> {
             Self::Backend(e) => write!(f, "SONiC DB error: {e}"),
             Self::Unconfirmed { db, key } => {
                 write!(f, "dataplane change not confirmed in {db:?}: {key}")
+            }
+            Self::InvalidVlan(v) => {
+                write!(f, "assigned VLAN {v:?} is not a SONiC VLAN id (1..=4094)")
             }
         }
     }

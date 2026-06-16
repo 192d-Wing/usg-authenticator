@@ -21,7 +21,7 @@ use std::sync::Mutex;
 const PORT: &str = "Ethernet12";
 const MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 
-// ---- A mock DbConn that records ops and tracks which keys "exist". ----
+// ---- A mock DbConn that tracks which keys "exist". ----
 
 #[derive(Default)]
 struct MockDb {
@@ -34,6 +34,10 @@ impl MockDb {
         let m = Self::default();
         *m.confirm_everything.lock().unwrap() = true;
         m
+    }
+    /// Pre-create a key (e.g. a provisioned ACL_TABLE).
+    fn seed(&self, key: &str) {
+        self.keys.lock().unwrap().insert(key.to_string());
     }
     fn fail_confirmation(&self) {
         *self.confirm_everything.lock().unwrap() = false;
@@ -87,20 +91,37 @@ fn eapol_trap_plan_targets_copp() {
 }
 
 #[test]
+fn close_permits_eapol_and_drops_the_rest() {
+    let ops = schema::plan_close(PORT);
+    // EAPOL permit at high priority...
+    assert!(ops.iter().any(|o| matches!(&o.op,
+        Op::HSet { key, fields } if key.contains("ALLOW_EAPOL")
+            && fields.iter().any(|(f, v)| f == "ETHER_TYPE" && v == "0x888E"))));
+    // ...and a catch-all DROP.
+    assert!(ops.iter().any(|o| matches!(&o.op,
+        Op::HSet { key, fields } if key.contains("DENY_ALL")
+            && fields.iter().any(|(f, v)| f == "PACKET_ACTION" && v == "DROP"))));
+}
+
+#[test]
 fn transition_unauthorized_to_authorized_with_vlan_and_acl() {
     let old = Desired::default();
     let new = Desired::from_authorization(&authz(Some("100"), Some("acl-staff")));
-    let ops = schema::transition(PORT, Target::Mac(MAC), &old, &new);
+    let ops = schema::transition(PORT, &old, &new);
 
-    // VLAN membership added, ACL bound, controlled port opened (deny removed).
     assert!(ops.iter().any(|o| matches!(&o.op,
         Op::HSet { key, fields } if key == "VLAN_MEMBER|Vlan100|Ethernet12"
             && fields.iter().any(|(f, v)| f == "tagging_mode" && v == "untagged"))));
     assert!(ops.iter().any(|o| matches!(&o.op,
         Op::ListAdd { key, value, .. } if key == "ACL_TABLE|acl-staff" && value == "Ethernet12")));
+    // Opening removes both the deny and the EAPOL-permit rules.
     assert!(
         ops.iter()
-            .any(|o| matches!(&o.op, Op::Del { key } if key.contains("DENY")))
+            .any(|o| matches!(&o.op, Op::Del { key } if key.contains("DENY_ALL")))
+    );
+    assert!(
+        ops.iter()
+            .any(|o| matches!(&o.op, Op::Del { key } if key.contains("ALLOW_EAPOL")))
     );
 }
 
@@ -108,22 +129,21 @@ fn transition_unauthorized_to_authorized_with_vlan_and_acl() {
 fn transition_authorized_to_unauthorized_installs_default_deny_and_drops_vlan() {
     let old = Desired::from_authorization(&authz(Some("100"), None));
     let new = Desired::default();
-    let ops = schema::transition(PORT, Target::Port, &old, &new);
+    let ops = schema::transition(PORT, &old, &new);
 
-    // Prior VLAN removed; default-deny rule installed.
     assert!(
         ops.iter()
             .any(|o| matches!(&o.op, Op::Del { key } if key == "VLAN_MEMBER|Vlan100|Ethernet12"))
     );
     assert!(ops.iter().any(|o| matches!(&o.op,
-        Op::HSet { key, fields } if key.contains("DENY")
+        Op::HSet { key, fields } if key.contains("DENY_ALL")
             && fields.iter().any(|(f, v)| f == "PACKET_ACTION" && v == "DROP"))));
 }
 
 #[test]
 fn reapplying_same_posture_is_a_noop() {
     let d = Desired::from_authorization(&authz(Some("100"), Some("f")));
-    assert!(schema::transition(PORT, Target::Port, &d, &d).is_empty());
+    assert!(schema::transition(PORT, &d, &d).is_empty());
 }
 
 #[test]
@@ -137,11 +157,22 @@ fn fallback_authorization_forwards_on_restricted_vlan() {
     assert_eq!(d.filter_id, None);
 }
 
+#[test]
+fn vlan_validity() {
+    assert!(schema::is_valid_vlan("100"));
+    assert!(schema::is_valid_vlan("4094"));
+    assert!(!schema::is_valid_vlan("0"));
+    assert!(!schema::is_valid_vlan("4095"));
+    assert!(!schema::is_valid_vlan("ENGINEERING"));
+}
+
 // ---- SonicEnforcer ----
 
 #[tokio::test]
-async fn ensure_eapol_trap_applies_and_confirms() {
+async fn ensure_eapol_trap_closes_the_port_fail_closed_start() {
     let enf = SonicEnforcer::new(MockDb::new());
+    // Bring-up installs the trap AND closes the port (deny present), so the
+    // port is never open before it authenticates.
     enf.ensure_eapol_trap(PORT).await.unwrap();
 }
 
@@ -157,19 +188,54 @@ async fn ensure_eapol_trap_fails_closed_when_unconfirmed() {
 }
 
 #[tokio::test]
-async fn apply_authorize_then_unauthorize_tracks_state() {
+async fn full_lifecycle_close_authorize_unauthorize() {
     let enf = SonicEnforcer::new(MockDb::new());
-    // Authorize on VLAN 100.
+    enf.ensure_eapol_trap(PORT).await.unwrap(); // closed
     enf.apply(PORT, Target::Mac(MAC), &authz(Some("100"), None))
         .await
-        .unwrap();
-    // Re-applying the same authorization is a no-op (state tracked) — confirm
-    // still succeeds because the vlan key persists.
-    enf.apply(PORT, Target::Mac(MAC), &authz(Some("100"), None))
-        .await
-        .unwrap();
-    // Unauthorize: removes VLAN, installs deny; confirm sees the deny rule.
+        .unwrap(); // open on VLAN 100
     enf.apply(PORT, Target::Mac(MAC), &PortAuthorization::Unauthorized)
+        .await
+        .unwrap(); // closed again
+}
+
+#[tokio::test]
+async fn authorized_without_vlan_confirms_port_is_open() {
+    let enf = SonicEnforcer::new(MockDb::new());
+    enf.ensure_eapol_trap(PORT).await.unwrap(); // deny present
+    // Bare accept (no VLAN): opening must remove the deny; confirmed via absence.
+    enf.apply(PORT, Target::Port, &authz(None, None))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn non_numeric_vlan_is_rejected_fail_closed() {
+    let enf = SonicEnforcer::new(MockDb::new());
+    assert!(matches!(
+        enf.apply(PORT, Target::Port, &authz(Some("ENGINEERING"), None))
+            .await,
+        Err(SonicError::InvalidVlan(_))
+    ));
+}
+
+#[tokio::test]
+async fn filter_id_to_missing_acl_table_fails_closed() {
+    let enf = SonicEnforcer::new(MockDb::new());
+    // ACL_TABLE|acl-x is NOT provisioned → authorize must fail closed.
+    assert!(matches!(
+        enf.apply(PORT, Target::Port, &authz(Some("100"), Some("acl-x")))
+            .await,
+        Err(SonicError::Unconfirmed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn filter_id_to_provisioned_acl_table_succeeds() {
+    let db = MockDb::new();
+    db.seed("ACL_TABLE|acl-staff"); // pre-provisioned named ACL
+    let enf = SonicEnforcer::new(db);
+    enf.apply(PORT, Target::Port, &authz(Some("100"), Some("acl-staff")))
         .await
         .unwrap();
 }
