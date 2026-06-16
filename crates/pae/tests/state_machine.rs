@@ -392,6 +392,35 @@ fn link_down_tears_down_from_any_state() {
 }
 
 #[test]
+fn reauth_losing_supplicant_tears_down_not_fail_open() {
+    // Regression: a re-auth that gets no supplicant response must close the
+    // established session (Stop + Unauthorized), not keep it authorized or shift
+    // it to a fallback VLAN without closing accounting.
+    let cfg = PaeConfig {
+        max_reauth_req: 1,
+        guest_vlan: Some("guest".to_string()), // even with guest configured...
+        ..PaeConfig::default()
+    };
+    let mut s = authenticate(&cfg);
+    s.step(accept("100"), &cfg);
+    assert!(s.is_authorized());
+
+    s.step(Event::Timer(TimerKind::Reauth), &cfg); // begin re-auth, port stays up
+    let fx = s.step(Event::Timer(TimerKind::TxPeriod), &cfg); // supplicant gone
+
+    assert!(fx.contains(&Effect::Accounting(AcctTrigger::Stop(
+        TerminateCause::ReauthFailure
+    ))));
+    assert!(fx.contains(&Effect::SetAuthorization(PortAuthorization::Unauthorized)));
+    // ...the session is torn down, NOT silently moved into the guest VLAN.
+    assert!(!fx.iter().any(|e| matches!(
+        e,
+        Effect::SetAuthorization(PortAuthorization::Fallback { .. })
+    )));
+    assert_eq!(s.state(), State::New);
+}
+
+#[test]
 fn unhandled_events_are_safe_no_ops() {
     let cfg = PaeConfig::default();
     let mut s = PortSession::new(MAC);

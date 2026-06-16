@@ -287,6 +287,13 @@ impl PortSession {
     /// No supplicant within `max_reauth_req` prompts: try MAB, else guest VLAN,
     /// else hold the (closed) port.
     fn no_supplicant(&mut self, cfg: &PaeConfig) -> Vec<Effect> {
+        // If this happened during a re-authentication (a session is already
+        // open), the supplicant has gone silent: fail the established session
+        // closed rather than silently keeping it authorized or shifting it to a
+        // fallback VLAN without closing accounting.
+        if self.accounting_open {
+            return self.teardown(TerminateCause::ReauthFailure);
+        }
         if cfg.mab_enabled {
             self.auth_kind = AuthKind::Mab;
             self.state = State::AuthServer;
@@ -297,20 +304,9 @@ impl PortSession {
             ];
         }
         if let Some(vlan) = cfg.guest_vlan.clone() {
-            self.state = State::Fallback(FallbackReason::Guest);
-            return vec![
-                Effect::CancelTimer(TimerKind::TxPeriod),
-                Effect::SetAuthorization(PortAuthorization::Fallback {
-                    reason: FallbackReason::Guest,
-                    vlan: Some(vlan),
-                }),
-            ];
+            return self.enter_fallback(FallbackReason::Guest, vlan);
         }
-        self.state = State::Held;
-        vec![
-            Effect::CancelTimer(TimerKind::TxPeriod),
-            Effect::ArmTimer(TimerKind::Held),
-        ]
+        self.hold()
     }
 
     fn authorize(
@@ -353,17 +349,10 @@ impl PortSession {
             fx.extend(self.teardown(TerminateCause::ReauthFailure));
             return fx;
         }
-        fx.push(Effect::CancelAllTimers);
         if let Some(vlan) = cfg.auth_fail_vlan.clone() {
-            self.state = State::Fallback(FallbackReason::AuthFail);
-            fx.push(Effect::SetAuthorization(PortAuthorization::Fallback {
-                reason: FallbackReason::AuthFail,
-                vlan: Some(vlan),
-            }));
+            fx.extend(self.enter_fallback(FallbackReason::AuthFail, vlan));
         } else {
-            self.state = State::Held;
-            fx.push(Effect::SetAuthorization(PortAuthorization::Unauthorized));
-            fx.push(Effect::ArmTimer(TimerKind::Held));
+            fx.extend(self.hold());
         }
         fx
     }
@@ -374,29 +363,22 @@ impl PortSession {
         // later retry rather than dropping a working session.
         if self.accounting_open {
             self.state = State::Authenticated;
-            return vec![
-                Effect::CancelTimer(TimerKind::ServerTimeout),
-                Effect::ArmTimer(TimerKind::Reauth),
-            ];
+            let mut fx = vec![Effect::CancelTimer(TimerKind::ServerTimeout)];
+            // Re-validate later only if periodic re-auth is configured; without
+            // it the session simply rides out the outage until a link/CoA event.
+            if cfg.reauth_enabled {
+                fx.push(Effect::ArmTimer(TimerKind::Reauth));
+            }
+            return fx;
         }
         if let Some(vlan) = cfg.critical_vlan.clone() {
-            self.state = State::Fallback(FallbackReason::Critical);
-            return vec![
-                Effect::CancelTimer(TimerKind::ServerTimeout),
-                Effect::SetAuthorization(PortAuthorization::Fallback {
-                    reason: FallbackReason::Critical,
-                    vlan: Some(vlan),
-                }),
-                Effect::ArmTimer(TimerKind::ServerTimeout),
-            ];
+            let mut fx = self.enter_fallback(FallbackReason::Critical, vlan);
+            // Periodically retry the server to leave the critical VLAN.
+            fx.push(Effect::ArmTimer(TimerKind::ServerTimeout));
+            return fx;
         }
         // No critical VLAN configured: fail closed.
-        self.state = State::Held;
-        vec![
-            Effect::CancelTimer(TimerKind::ServerTimeout),
-            Effect::SetAuthorization(PortAuthorization::Unauthorized),
-            Effect::ArmTimer(TimerKind::Held),
-        ]
+        self.hold()
     }
 
     /// Begin re-authentication while keeping the port authorized meanwhile.
@@ -418,6 +400,20 @@ impl PortSession {
         ))]
     }
 
+    /// Enter a fallback VLAN with the given reason. Centralized so the state's
+    /// `reason` and the emitted `SetAuthorization` reason can never disagree.
+    fn enter_fallback(&mut self, reason: FallbackReason, vlan: String) -> Vec<Effect> {
+        self.state = State::Fallback(reason);
+        vec![
+            Effect::CancelAllTimers,
+            Effect::SetAuthorization(PortAuthorization::Fallback {
+                reason,
+                vlan: Some(vlan),
+            }),
+        ]
+    }
+
+    /// Close the port and hold it for the quiet period before retrying.
     fn hold(&mut self) -> Vec<Effect> {
         self.state = State::Held;
         vec![

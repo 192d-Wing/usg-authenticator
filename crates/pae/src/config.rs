@@ -25,8 +25,10 @@ pub enum HostMode {
 pub struct Timers {
     /// Gap between EAP-Request/Identity transmissions while connecting.
     pub tx_period: u32,
-    /// How long a port stays held after an authentication failure.
-    pub quiet_period: u32,
+    /// How long a port stays held after an authentication failure (backs
+    /// [`TimerKind::Held`]; named to match it so the daemon's timer mapping is
+    /// unambiguous).
+    pub held_period: u32,
     /// Interval between periodic re-authentications (when enabled).
     pub reauth_period: u32,
     /// How long to wait for the authentication server before declaring it
@@ -40,7 +42,7 @@ impl Default for Timers {
     fn default() -> Self {
         Self {
             tx_period: 30,
-            quiet_period: 60,
+            held_period: 60,
             reauth_period: 3600,
             server_timeout: 30,
             supp_timeout: 30,

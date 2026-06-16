@@ -110,6 +110,22 @@ fn multi_host_opens_whole_port_on_first_auth() {
 }
 
 #[test]
+fn multi_host_logoff_revokes_the_port_wide_open() {
+    // Regression: in multi-host the opener logging off must revoke the port-wide
+    // open, not leave the whole port admitting every MAC.
+    let mut port = PortPae::new(cfg(HostMode::MultiHost));
+    authorize(&mut port, MAC_A, "10");
+
+    let fx = port.handle(MAC_A, Event::EapolLogoff);
+    assert!(fx.iter().any(|d| d.mac.is_none()
+        && matches!(
+            d.effect,
+            Effect::SetAuthorization(PortAuthorization::Unauthorized)
+        )));
+    assert_eq!(port.active_sessions(), 0);
+}
+
+#[test]
 fn multi_domain_admits_two_then_caps() {
     let mut port = PortPae::new(cfg(HostMode::MultiDomain));
     port.handle(MAC_A, Event::EapolStart);

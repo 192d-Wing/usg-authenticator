@@ -134,21 +134,19 @@ impl PortPae {
     }
 }
 
-/// Tag a session's effects with its MAC, and in multi-host mirror a session
-/// authorization as a port-wide open so the dataplane admits all MACs.
+/// Tag a session's effects with its MAC. In multi-host the port's authorization
+/// is port-wide (the first authenticated MAC opens it for all), so *every*
+/// `SetAuthorization` — authorize **and** de-authorize — is directed at the
+/// whole port (`mac == None`); otherwise a logoff/failure of the opener would
+/// leave the port open for everyone. All other effects (EAP relay, RADIUS,
+/// timers, accounting) stay tied to the specific supplicant.
 fn decorate(host_mode: HostMode, mac: MacAddr, fx: Vec<Effect>) -> Vec<DirectedEffect> {
     let mut out = Vec::with_capacity(fx.len());
     for effect in fx {
-        if host_mode == HostMode::MultiHost
-            && let Effect::SetAuthorization(PortAuthorization::Authorized(_)) = &effect
-        {
-            out.push(DirectedEffect {
-                mac: None,
-                effect: effect.clone(),
-            });
-        }
+        let port_wide =
+            host_mode == HostMode::MultiHost && matches!(effect, Effect::SetAuthorization(_));
         out.push(DirectedEffect {
-            mac: Some(mac),
+            mac: if port_wide { None } else { Some(mac) },
             effect,
         });
     }
