@@ -8,10 +8,12 @@ pub enum EapolError {
     InvalidInterfaceName(String),
     /// The interface could not be resolved to an index (`if_nametoindex`).
     InterfaceNotFound(String),
-    /// A socket syscall (`socket`/`bind`/`recv`/`send`/`fcntl`) failed. On a
-    /// non-Linux host, `socket(AF_PACKET, …)` fails here — the layer only
-    /// functions on Linux (SONiC).
+    /// A socket syscall (`socket`/`bind`/`recv`/`send`) failed. On a non-Linux
+    /// host, `socket(AF_PACKET, …)` fails here — the layer only functions on
+    /// Linux (SONiC).
     Io(std::io::Error),
+    /// A frame too short to be a valid Ethernet frame was passed to `send`.
+    FrameTooShort(usize),
 }
 
 impl core::fmt::Display for EapolError {
@@ -20,6 +22,7 @@ impl core::fmt::Display for EapolError {
             Self::InvalidInterfaceName(n) => write!(f, "invalid interface name {n:?}"),
             Self::InterfaceNotFound(n) => write!(f, "interface {n:?} not found"),
             Self::Io(e) => write!(f, "socket I/O error: {e}"),
+            Self::FrameTooShort(n) => write!(f, "frame too short to send: {n} octets"),
         }
     }
 }

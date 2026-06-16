@@ -24,6 +24,13 @@ const AF_PACKET_U16: u16 = 17;
 const IFNAMSIZ: usize = 16;
 /// Receive buffer: a full Ethernet frame with a VLAN tag and slack.
 const FRAME_CAP: usize = 1600;
+/// Smallest valid Ethernet frame (dst+src+ethertype) we will transmit.
+const ETHERNET_HEADER_LEN: usize = 14;
+/// Linux `SOCK_CLOEXEC` / `SOCK_NONBLOCK` socket-type flags, defined locally so
+/// the crate compiles off-Linux. ORed into the `socket(2)` type so the fd is
+/// close-on-exec and non-blocking atomically (no fork/exec leak window).
+const SOCK_CLOEXEC: i32 = 0o2_000_000;
+const SOCK_NONBLOCK: i32 = 0o4_000;
 
 /// Convert a `u16` to network byte order.
 #[must_use]
@@ -88,10 +95,17 @@ impl EapolSocket {
     pub fn open(ifname: &str) -> Result<Self, EapolError> {
         let ifindex = interface_index(ifname)?;
 
-        // SAFETY: a straightforward `socket(2)` call with constant arguments;
-        // it returns a new fd (≥0) or -1 with errno set. No memory is touched.
-        let raw =
-            unsafe { libc::socket(AF_PACKET_I32, libc::SOCK_RAW, i32::from(htons(ETH_P_PAE))) };
+        // SAFETY: a straightforward `socket(2)` call with constant arguments.
+        // SOCK_CLOEXEC | SOCK_NONBLOCK make the fd close-on-exec and non-blocking
+        // atomically (no fork/exec leak window, and ready for the async reactor).
+        // Returns a new fd (≥0) or -1 with errno set. No memory is touched.
+        let raw = unsafe {
+            libc::socket(
+                AF_PACKET_I32,
+                libc::SOCK_RAW | SOCK_CLOEXEC | SOCK_NONBLOCK,
+                i32::from(htons(ETH_P_PAE)),
+            )
+        };
         if raw < 0 {
             return Err(EapolError::Io(std::io::Error::last_os_error()));
         }
@@ -99,7 +113,6 @@ impl EapolSocket {
         // it in `OwnedFd` gives it RAII close and sole ownership.
         let owned = unsafe { OwnedFd::from_raw_fd(raw) };
 
-        set_nonblocking_cloexec(&owned)?;
         bind_to_interface(&owned, ifindex)?;
 
         let fd = AsyncFd::new(owned).map_err(EapolError::Io)?;
@@ -139,22 +152,23 @@ impl EapolSocket {
     }
 
     /// Send a complete EAPOL Ethernet frame out the bound interface. The frame
-    /// includes its own L2 header (built by `pacp`); the destination MAC is read
-    /// from the frame for the packet address.
+    /// includes its own L2 header (built by `pacp`); for `SOCK_RAW` the kernel
+    /// transmits that header verbatim and selects egress solely by the bound
+    /// interface (`sll_ifindex`), so the destination is not supplied here.
     ///
     /// # Errors
-    /// [`EapolError::Io`] on a socket error.
+    /// - [`EapolError::FrameTooShort`] if `frame` is shorter than an Ethernet header.
+    /// - [`EapolError::Io`] on a socket error.
     pub async fn send(&self, frame: &[u8]) -> Result<(), EapolError> {
-        let mut dest = SockaddrLl {
+        if frame.len() < ETHERNET_HEADER_LEN {
+            return Err(EapolError::FrameTooShort(frame.len()));
+        }
+        let dest = SockaddrLl {
             sll_family: AF_PACKET_U16,
             sll_protocol: htons(ETH_P_PAE),
             sll_ifindex: self.ifindex,
-            sll_halen: 6,
             ..SockaddrLl::default()
         };
-        if let (Some(dst_mac), Some(slot)) = (frame.get(0..6), dest.sll_addr.get_mut(0..6)) {
-            slot.copy_from_slice(dst_mac);
-        }
         let addrlen = u32::try_from(core::mem::size_of::<SockaddrLl>()).unwrap_or(0);
 
         loop {
@@ -185,27 +199,6 @@ impl EapolSocket {
             }
         }
     }
-}
-
-/// Put the socket in non-blocking mode (required by the async reactor) and set
-/// close-on-exec.
-fn set_nonblocking_cloexec(fd: &OwnedFd) -> Result<(), EapolError> {
-    let raw = fd.as_raw_fd();
-    // SAFETY: `raw` is a valid open fd owned by `fd`; these fcntl calls read and
-    // set its flags and return -1 on error.
-    let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(EapolError::Io(std::io::Error::last_os_error()));
-    }
-    // SAFETY: as above.
-    if unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(EapolError::Io(std::io::Error::last_os_error()));
-    }
-    // SAFETY: as above.
-    if unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-        return Err(EapolError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(())
 }
 
 /// Bind the socket to `ifindex` with the EAPOL protocol.
