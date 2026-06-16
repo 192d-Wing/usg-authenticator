@@ -23,6 +23,18 @@ pub enum RadSecError {
     Proto(PacketError),
     /// A DNS name for the server certificate was invalid.
     BadServerName,
+    /// A connect or request exceeded its deadline (the server accepted the
+    /// connection but did not answer in time) — fail closed.
+    Timeout,
+    /// The reply's RADIUS Identifier did not match the outstanding request, so
+    /// it cannot be this request's answer (RFC 2865 §3): a stale, duplicated, or
+    /// server-initiated packet on the connection.
+    UnexpectedReply {
+        /// Identifier we sent.
+        expected: u8,
+        /// Identifier the reply carried.
+        got: u8,
+    },
 }
 
 impl core::fmt::Display for RadSecError {
@@ -41,6 +53,13 @@ impl core::fmt::Display for RadSecError {
             Self::BadFrameLength(n) => write!(f, "RADIUS frame length {n} outside 20..=4096"),
             Self::Proto(e) => write!(f, "RADIUS codec error: {e}"),
             Self::BadServerName => write!(f, "invalid server DNS name"),
+            Self::Timeout => write!(f, "RadSec operation timed out"),
+            Self::UnexpectedReply { expected, got } => {
+                write!(
+                    f,
+                    "reply identifier {got} does not match request {expected}"
+                )
+            }
         }
     }
 }

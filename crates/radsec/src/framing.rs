@@ -6,10 +6,11 @@ use crate::error::RadSecError;
 use radius_proto::Packet;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Smallest valid RADIUS packet (header only), RFC 2865.
-pub const MIN_RADIUS_LEN: usize = 20;
-/// Largest RADIUS packet we accept, RFC 2865.
-pub const MAX_RADIUS_LEN: usize = 4096;
+/// Smallest valid RADIUS packet (header only) — sourced from `radius-proto` so
+/// the framer and the codec can never disagree on bounds.
+pub const MIN_RADIUS_LEN: usize = Packet::MIN_PACKET_SIZE;
+/// Largest RADIUS packet we accept — sourced from `radius-proto`.
+pub const MAX_RADIUS_LEN: usize = Packet::MAX_PACKET_SIZE;
 /// Octets in the RADIUS header (`code | id | length(2)`).
 const HEADER_LEN: usize = 4;
 

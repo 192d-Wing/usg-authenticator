@@ -15,10 +15,13 @@
 //! Design rules:
 //! - **TLS 1.3 only**: `rustls` is built without the `tls12` feature, so 1.2
 //!   cannot be negotiated even by mistake.
-//! - **Fail closed**: the crypto policy is asserted when the config is built;
-//!   a malformed RADIUS frame or a failed handshake is an error, never a
-//!   silent fallback. The `fips` build feature makes the module FIPS 140-3
-//!   validated; [`fips::assert_fips`] gates production startup.
+//! - **Fail closed**: [`tls::client_config`] enforces the full FIPS gate
+//!   ([`fips::assert_fips`]) before returning — a non-FIPS module or a widened
+//!   crypto policy yields no usable config, so `RadSec` cannot run outside the
+//!   FIPS boundary. A malformed RADIUS frame or a failed handshake is an error,
+//!   never a silent fallback. The `fips` build feature supplies the validated
+//!   aws-lc-rs module (the default build is non-FIPS and intentionally cannot
+//!   produce a config).
 //!
 //! This crate is the only one that performs network I/O; everything below it
 //! (`radius-client`, `pae`, `pacp`) stays pure.

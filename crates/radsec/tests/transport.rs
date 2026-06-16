@@ -61,6 +61,20 @@ fn assert_fips_requires_the_fips_module() {
     }
 }
 
+#[test]
+fn client_config_fails_closed_without_fips_module() {
+    // The whole transport refuses to build a config off the FIPS boundary. In a
+    // non-`fips` build that means client_config cannot succeed at all (the gate
+    // runs before any PEM is parsed), so RadSec never runs on a non-FIPS module.
+    let result = radsec::client_config(b"", b"", b"");
+    if cfg!(feature = "fips") {
+        // With FIPS, the gate passes and we fail later on the empty trust anchor.
+        assert!(matches!(result, Err(radsec::RadSecError::NoCredential)));
+    } else {
+        assert!(matches!(result, Err(radsec::RadSecError::NotFips)));
+    }
+}
+
 // ---- Framing ----
 
 fn sample_packet() -> Packet {

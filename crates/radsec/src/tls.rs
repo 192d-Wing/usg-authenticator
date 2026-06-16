@@ -16,12 +16,16 @@ use std::sync::Arc;
 /// - `client_cert_pem`: the NAS client certificate chain;
 /// - `client_key_pem`: the NAS private key.
 ///
-/// TLS 1.3 only; the crypto policy is asserted before the config is returned so
-/// a provider drift cannot widen it.
+/// TLS 1.3 only. The full fail-closed FIPS gate (DESIGN §7) is enforced here
+/// before anything else: the crypto module MUST be FIPS-validated **and** offer
+/// exactly the locked ML-KEM-1024 / AES-256 policy. A build without the `fips`
+/// feature therefore cannot produce a usable config — `RadSec` does not run on a
+/// non-FIPS module.
 ///
 /// # Errors
+/// - [`RadSecError::NotFips`] if the crypto module is not FIPS-validated.
+/// - [`RadSecError::CryptoPolicyViolation`] if the policy is not the locked one.
 /// - [`RadSecError::NoCredential`] if a PEM yields no cert/key.
-/// - [`RadSecError::CryptoPolicyViolation`] if the policy check fails.
 /// - [`RadSecError::Tls`] for an invalid key or config.
 pub fn client_config(
     trust_anchors_pem: &[u8],
@@ -29,7 +33,8 @@ pub fn client_config(
     client_key_pem: &[u8],
 ) -> Result<ClientConfig, RadSecError> {
     let provider = fips::provider();
-    fips::assert_policy(&provider)?;
+    // Fail closed up front: no FIPS module (or a widened policy) ⇒ no config.
+    fips::assert_fips(&provider)?;
 
     let mut roots = RootCertStore::empty();
     let mut any_root = false;
