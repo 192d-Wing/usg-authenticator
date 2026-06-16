@@ -35,7 +35,13 @@ pub mod enforcer;
 pub mod error;
 pub mod schema;
 
+#[cfg(feature = "redis-backend")]
+pub mod redis_conn;
+
 pub use db::{Db, DbConn, DbOp, Op};
 pub use enforcer::SonicEnforcer;
 pub use error::SonicError;
 pub use schema::Desired;
+
+#[cfg(feature = "redis-backend")]
+pub use redis_conn::RedisDbConn;

@@ -51,3 +51,9 @@ jobs:
       - name: Test
         working-directory: usg-authenticator
         run: cargo test --workspace
+
+      # The redis-backed SONiC DbConn is feature-gated (no server in CI); lint it
+      # so it cannot rot.
+      - name: Clippy redis-backend feature
+        working-directory: usg-authenticator/crates/enforce-sonic
+        run: cargo clippy --features redis-backend -- -D warnings

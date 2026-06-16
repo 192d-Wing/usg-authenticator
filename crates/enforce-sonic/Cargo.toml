@@ -11,6 +11,13 @@ description = "SONiC (SAI/swss) dataplane backend for the 802.1X authenticator: 
 enforce = { path = "../enforce" }
 pacp = { path = "../pacp" }
 pae = { path = "../pae" }
+# Production backend: a redis-backed DbConn talking to the SONiC databases.
+# Off by default so the planner/SonicEnforcer test without a Redis server.
+redis = { version = "1.2", optional = true, default-features = false, features = ["tokio-comp"] }
+
+[features]
+default = []
+redis-backend = ["dep:redis"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
