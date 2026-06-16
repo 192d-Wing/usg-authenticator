@@ -1,5 +1,5 @@
-//! Tests for RADIUS request building, reply parsing, accounting, and the
-//! User-Name sanitization carried forward from the Milestone 1 review.
+//! Tests for RADIUS request building, reply parsing/verification, accounting,
+//! State echoing, and the User-Name sanitization carried from the M1 review.
 #![allow(
     clippy::indexing_slicing,
     clippy::unwrap_used,
@@ -12,7 +12,7 @@
 use pae::{AcctTrigger, Event, TerminateCause};
 use radius_client::{
     RadiusClientError, RequestContext, access_request_eap, access_request_mab, accounting_request,
-    parse_reply, verify_reply,
+    extract_state, parse_reply, verify_reply,
 };
 use radius_proto::{
     Attribute, AttributeType, Code, Packet, calculate_message_authenticator,
@@ -43,34 +43,48 @@ fn find_string(p: &Packet, ty: AttributeType) -> String {
 
 #[test]
 fn access_request_carries_nas_attrs_username_and_eap() {
-    // EAP-Response/Identity "alice".
     let eap = [2u8, 1, 0, 10, 1, b'a', b'l', b'i', b'c', b'e'];
-    let pkt = access_request_eap(&ctx(), 7, REQ_AUTH, Some(b"alice"), &eap, SECRET).unwrap();
+    let pkt = access_request_eap(&ctx(), 7, REQ_AUTH, Some(b"alice"), None, &eap, SECRET).unwrap();
 
     assert_eq!(pkt.code, Code::AccessRequest);
-    assert_eq!(pkt.identifier, 7);
     assert_eq!(find_string(&pkt, AttributeType::UserName), "alice");
     assert_eq!(
         find_string(&pkt, AttributeType::CallingStationId),
         "00-11-22-33-44-55"
     );
     assert_eq!(find_string(&pkt, AttributeType::NasIdentifier), "tor-sw-1");
-    // NAS-Port-Type = Ethernet (15).
     let npt = pkt
         .find_attribute(AttributeType::NasPortType as u8)
         .unwrap();
     assert_eq!(npt.value, 15u32.to_be_bytes());
-    // The EAP we passed is present as an EAP-Message attribute, verbatim.
-    let eap_attr = pkt.find_attribute(79).unwrap();
-    assert_eq!(eap_attr.value, eap);
+    assert_eq!(pkt.find_attribute(79).unwrap().value, eap);
+    // No challenge yet → no State echoed.
+    assert!(pkt.find_attribute(24).is_none());
+}
+
+#[test]
+fn access_request_echoes_state_from_challenge() {
+    let eap = [2u8, 5, 0, 6, 13, 0x00];
+    let state = b"opaque-server-state";
+    let pkt = access_request_eap(&ctx(), 5, REQ_AUTH, None, Some(state), &eap, SECRET).unwrap();
+    // The State attribute (24) is echoed verbatim so the server finds the
+    // in-flight EAP session.
+    assert_eq!(pkt.find_attribute(24).unwrap().value, state);
+}
+
+#[test]
+fn empty_eap_relay_is_rejected() {
+    assert!(matches!(
+        access_request_eap(&ctx(), 1, REQ_AUTH, None, None, &[], SECRET),
+        Err(RadiusClientError::EmptyEapRelay)
+    ));
 }
 
 #[test]
 fn access_request_message_authenticator_is_valid() {
     let eap = [2u8, 1, 0, 5, 1];
-    let pkt = access_request_eap(&ctx(), 1, REQ_AUTH, Some(b"x"), &eap, SECRET).unwrap();
+    let pkt = access_request_eap(&ctx(), 1, REQ_AUTH, Some(b"x"), None, &eap, SECRET).unwrap();
 
-    // Recompute: zero the Message-Authenticator, re-encode, HMAC, compare.
     let mut zeroed = pkt.clone();
     let stored = zeroed
         .attributes
@@ -79,6 +93,15 @@ fn access_request_message_authenticator_is_valid() {
         .unwrap()
         .value
         .clone();
+    // Exactly one Message-Authenticator (seal is idempotent).
+    assert_eq!(
+        zeroed
+            .attributes
+            .iter()
+            .filter(|a| a.attr_type == 80)
+            .count(),
+        1
+    );
     for a in &mut zeroed.attributes {
         if a.attr_type == 80 {
             a.value = vec![0u8; 16];
@@ -90,10 +113,8 @@ fn access_request_message_authenticator_is_valid() {
 
 #[test]
 fn long_eap_is_fragmented_then_reassembles_verbatim() {
-    // 600-octet EAP packet (a TEAP/TLS handshake fragment) → multiple
-    // EAP-Message attributes that reassemble to the original.
     let eap: Vec<u8> = (0..600u32).map(|i| (i % 251) as u8).collect();
-    let pkt = access_request_eap(&ctx(), 3, REQ_AUTH, None, &eap, SECRET).unwrap();
+    let pkt = access_request_eap(&ctx(), 3, REQ_AUTH, None, None, &eap, SECRET).unwrap();
 
     let frags = pkt.find_all_attributes(79);
     assert!(frags.len() >= 3);
@@ -114,17 +135,23 @@ fn mab_request_uses_mac_username_and_call_check() {
     let st = pkt
         .find_attribute(AttributeType::ServiceType as u8)
         .unwrap();
-    assert_eq!(st.value, 10u32.to_be_bytes()); // Call-Check
-    assert!(pkt.find_attribute(79).is_none()); // no EAP
+    assert_eq!(st.value, 10u32.to_be_bytes());
+    assert!(pkt.find_attribute(79).is_none());
 }
 
 // ---- User-Name sanitization (fail closed) ----
 
 #[test]
-fn identity_with_control_chars_is_rejected() {
+fn identity_with_control_or_separator_chars_is_rejected() {
     let eap = [2u8, 1, 0, 5, 1];
-    for bad in [&b"alice\n"[..], &b"a\0b"[..], &b"x\r\nFilter-Id"[..]] {
-        let err = access_request_eap(&ctx(), 1, REQ_AUTH, Some(bad), &eap, SECRET);
+    let line_sep = "a\u{2028}b";
+    for bad in [
+        &b"alice\n"[..],
+        &b"a\0b"[..],
+        &b"x\r\nFilter-Id"[..],
+        line_sep.as_bytes(),
+    ] {
+        let err = access_request_eap(&ctx(), 1, REQ_AUTH, Some(bad), None, &eap, SECRET);
         assert!(matches!(err, Err(RadiusClientError::InvalidUserName)));
     }
 }
@@ -133,49 +160,64 @@ fn identity_with_control_chars_is_rejected() {
 fn empty_or_oversize_identity_is_rejected() {
     let eap = [2u8, 1, 0, 5, 1];
     assert!(matches!(
-        access_request_eap(&ctx(), 1, REQ_AUTH, Some(b""), &eap, SECRET),
+        access_request_eap(&ctx(), 1, REQ_AUTH, Some(b""), None, &eap, SECRET),
         Err(RadiusClientError::InvalidUserName)
     ));
     let huge = vec![b'a'; 254];
     assert!(matches!(
-        access_request_eap(&ctx(), 1, REQ_AUTH, Some(&huge), &eap, SECRET),
+        access_request_eap(&ctx(), 1, REQ_AUTH, Some(&huge), None, &eap, SECRET),
         Err(RadiusClientError::InvalidUserName)
     ));
 }
 
-// ---- Reply parsing ----
+// ---- Reply fixtures: seal like the server (M-A then Response Authenticator) ----
 
-/// Build a reply with a valid Response Authenticator over the request.
-fn signed_reply(code: Code, attrs: Vec<Attribute>) -> Packet {
+fn seal_reply(code: Code, attrs: Vec<Attribute>) -> Packet {
     let mut p = Packet::new(code, 7, [0u8; 16]);
     for a in attrs {
         p.add_attribute(a);
+    }
+    // Message-Authenticator is computed with the Request Authenticator in the
+    // authenticator field (RFC 3579 §3.2).
+    p.add_attribute(Attribute::new(80, vec![0u8; 16]).unwrap());
+    p.authenticator = REQ_AUTH;
+    let mac = calculate_message_authenticator(&p.encode().unwrap(), SECRET);
+    for a in &mut p.attributes {
+        if a.attr_type == 80 {
+            a.value = mac.to_vec();
+        }
     }
     p.authenticator = calculate_response_authenticator(&p, &REQ_AUTH, SECRET);
     p
 }
 
-fn tunnel_group(vlan: &str) -> Attribute {
-    // RFC 2868 tagged string: tag octet (1) then the ASCII VLAN id.
-    let mut v = vec![1u8];
-    v.extend_from_slice(vlan.as_bytes());
-    Attribute::new(81, v).unwrap()
+/// A valid RFC 3580 VLAN group: Tunnel-Type=13, Tunnel-Medium-Type=6, and the
+/// Tunnel-Private-Group-ID (tagged or untagged).
+fn vlan_group(vlan: &str, tagged: bool) -> Vec<Attribute> {
+    let group = if tagged {
+        let mut v = vec![1u8];
+        v.extend_from_slice(vlan.as_bytes());
+        v
+    } else {
+        vlan.as_bytes().to_vec()
+    };
+    vec![
+        Attribute::new(64, vec![1, 0, 0, 13]).unwrap(),
+        Attribute::new(65, vec![1, 0, 0, 6]).unwrap(),
+        Attribute::new(81, group).unwrap(),
+    ]
 }
 
 #[test]
 fn parse_access_accept_extracts_authorization() {
-    let reply = signed_reply(
-        Code::AccessAccept,
-        vec![
-            tunnel_group("100"),
-            Attribute::string(AttributeType::FilterId as u8, "acl-staff").unwrap(),
-            Attribute::integer(AttributeType::SessionTimeout as u8, 3600).unwrap(),
-            Attribute::new(AttributeType::Class as u8, vec![0xDE, 0xAD]).unwrap(),
-            Attribute::new(79, vec![3, 7, 0, 4]).unwrap(), // EAP-Success
-        ],
-    );
-    assert!(verify_reply(&reply, &REQ_AUTH, SECRET));
+    let mut attrs = vlan_group("100", true);
+    attrs.push(Attribute::string(AttributeType::FilterId as u8, "acl-staff").unwrap());
+    attrs.push(Attribute::integer(AttributeType::SessionTimeout as u8, 3600).unwrap());
+    attrs.push(Attribute::new(AttributeType::Class as u8, vec![0xDE, 0xAD]).unwrap());
+    attrs.push(Attribute::new(79, vec![3, 7, 0, 4]).unwrap()); // EAP-Success
+    let reply = seal_reply(Code::AccessAccept, attrs);
 
+    assert!(verify_reply(&reply, &REQ_AUTH, SECRET));
     match parse_reply(&reply).unwrap() {
         Event::AccessAccept { authorization, eap } => {
             assert_eq!(authorization.vlan.as_deref(), Some("100"));
@@ -189,17 +231,26 @@ fn parse_access_accept_extracts_authorization() {
 }
 
 #[test]
-fn parse_access_challenge_and_reject() {
-    let chal = signed_reply(
+fn challenge_verifies_and_state_is_extracted() {
+    let reply = seal_reply(
         Code::AccessChallenge,
-        vec![Attribute::new(79, vec![1, 8, 0, 6, 13, 0]).unwrap()],
+        vec![
+            Attribute::new(79, vec![1, 8, 0, 6, 13, 0]).unwrap(),
+            Attribute::new(24, b"sess-7".to_vec()).unwrap(),
+        ],
     );
+    assert!(verify_reply(&reply, &REQ_AUTH, SECRET));
+    assert_eq!(extract_state(&reply), Some(b"sess-7".to_vec()));
     assert!(matches!(
-        parse_reply(&chal).unwrap(),
+        parse_reply(&reply).unwrap(),
         Event::AccessChallenge { eap } if eap == vec![1, 8, 0, 6, 13, 0]
     ));
+}
 
-    let rej = signed_reply(Code::AccessReject, vec![]);
+#[test]
+fn reject_parses_with_no_eap() {
+    let rej = seal_reply(Code::AccessReject, vec![]);
+    assert!(verify_reply(&rej, &REQ_AUTH, SECRET));
     assert!(matches!(
         parse_reply(&rej).unwrap(),
         Event::AccessReject { eap: None }
@@ -208,7 +259,7 @@ fn parse_access_challenge_and_reject() {
 
 #[test]
 fn challenge_without_eap_is_rejected() {
-    let chal = signed_reply(Code::AccessChallenge, vec![]);
+    let chal = seal_reply(Code::AccessChallenge, vec![]);
     assert!(matches!(
         parse_reply(&chal),
         Err(RadiusClientError::MissingEapMessage)
@@ -216,20 +267,41 @@ fn challenge_without_eap_is_rejected() {
 }
 
 #[test]
+fn reply_with_eap_but_no_message_authenticator_fails_verification() {
+    // Access-Accept carrying EAP but WITHOUT a Message-Authenticator, with only a
+    // valid Response Authenticator — must fail (RFC 3579 §3.2).
+    let mut p = Packet::new(Code::AccessAccept, 7, [0u8; 16]);
+    p.add_attribute(Attribute::new(79, vec![3, 7, 0, 4]).unwrap());
+    p.authenticator = calculate_response_authenticator(&p, &REQ_AUTH, SECRET);
+    assert!(!verify_reply(&p, &REQ_AUTH, SECRET));
+}
+
+#[test]
 fn forged_reply_fails_verification() {
-    let reply = signed_reply(Code::AccessAccept, vec![tunnel_group("100")]);
-    // Wrong request authenticator → verification fails.
+    let reply = seal_reply(Code::AccessAccept, vlan_group("100", true));
     let wrong = [0u8; 16];
     assert!(!verify_reply(&reply, &wrong, SECRET));
 }
 
 #[test]
-fn tunnel_group_without_tag_octet_is_parsed() {
-    // A value whose first octet is >= 0x20 is all string (no tag).
-    let reply = signed_reply(
-        Code::AccessAccept,
-        vec![Attribute::new(81, b"200".to_vec()).unwrap()],
-    );
+fn vlan_without_tunnel_type_is_rejected_fail_closed() {
+    // A Tunnel-Private-Group-ID present without Tunnel-Type/Medium-Type.
+    let group = {
+        let mut v = vec![1u8];
+        v.extend_from_slice(b"100");
+        v
+    };
+    let reply = seal_reply(Code::AccessAccept, vec![Attribute::new(81, group).unwrap()]);
+    assert!(matches!(
+        parse_reply(&reply),
+        Err(RadiusClientError::MalformedVlanAssignment)
+    ));
+}
+
+#[test]
+fn untagged_tunnel_group_is_parsed() {
+    // First octet >= 0x20 → no tag; whole value is the VLAN id.
+    let reply = seal_reply(Code::AccessAccept, vlan_group("200", false));
     match parse_reply(&reply).unwrap() {
         Event::AccessAccept { authorization, .. } => {
             assert_eq!(authorization.vlan.as_deref(), Some("200"));
@@ -247,7 +319,7 @@ fn accounting_start_and_stop_round_trip() {
     let st = start
         .find_attribute(AttributeType::AcctStatusType as u8)
         .unwrap();
-    assert_eq!(st.value, 1u32.to_be_bytes()); // Start
+    assert_eq!(st.value, 1u32.to_be_bytes());
     assert_eq!(find_string(&start, AttributeType::AcctSessionId), "sess-42");
 
     let stop = accounting_request(
@@ -262,7 +334,7 @@ fn accounting_start_and_stop_round_trip() {
     let st = stop
         .find_attribute(AttributeType::AcctStatusType as u8)
         .unwrap();
-    assert_eq!(st.value, 2u32.to_be_bytes()); // Stop
+    assert_eq!(st.value, 2u32.to_be_bytes());
     let tc = stop
         .find_attribute(AttributeType::AcctTerminateCause as u8)
         .unwrap();
@@ -273,6 +345,5 @@ fn accounting_start_and_stop_round_trip() {
             .value,
         vec![0xDE, 0xAD]
     );
-    // The accounting Request Authenticator is non-zero (computed).
     assert_ne!(stop.authenticator, [0u8; 16]);
 }

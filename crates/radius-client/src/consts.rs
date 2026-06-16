@@ -7,6 +7,17 @@ pub const EAP_MESSAGE: u8 = 79;
 pub const MESSAGE_AUTHENTICATOR: u8 = 80;
 /// `NAS-Port-Id` (RFC 2869).
 pub const NAS_PORT_ID: u8 = 87;
+/// `State` (RFC 2865) — the server's opaque challenge handle, echoed verbatim
+/// in the next `Access-Request` so the server finds the in-flight EAP session.
+pub const STATE: u8 = 24;
+/// `Tunnel-Type` (RFC 2868) — must be VLAN (13) for a VLAN assignment.
+pub const TUNNEL_TYPE: u8 = 64;
+/// `Tunnel-Medium-Type` (RFC 2868) — must be 802 (6) for a VLAN assignment.
+pub const TUNNEL_MEDIUM_TYPE: u8 = 65;
+/// `Tunnel-Type` value for a VLAN (RFC 3580 §3.1).
+pub const TUNNEL_TYPE_VLAN: u32 = 13;
+/// `Tunnel-Medium-Type` value for IEEE 802 (RFC 3580 §3.1).
+pub const TUNNEL_MEDIUM_802: u32 = 6;
 /// `Tunnel-Private-Group-ID` (RFC 2868) — carries the assigned VLAN.
 pub const TUNNEL_PRIVATE_GROUP_ID: u8 = 81;
 

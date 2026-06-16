@@ -22,7 +22,12 @@ pub fn user_name(identity: &[u8]) -> Result<String, RadiusClientError> {
         return Err(RadiusClientError::InvalidUserName);
     }
     let s = core::str::from_utf8(identity).map_err(|_| RadiusClientError::InvalidUserName)?;
-    if s.chars().any(char::is_control) {
+    // Reject control characters (C0/C1/DEL — incl. NUL/CR/LF) and the Unicode
+    // line/paragraph separators (U+2028/U+2029), which are not `is_control` but
+    // act as line breaks in many log/policy parsers.
+    if s.chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
         return Err(RadiusClientError::InvalidUserName);
     }
     Ok(s.to_string())

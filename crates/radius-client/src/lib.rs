@@ -27,5 +27,5 @@ pub mod sanitize;
 pub use accounting::accounting_request;
 pub use context::RequestContext;
 pub use error::RadiusClientError;
-pub use reply::{parse_authorization, parse_reply, verify_reply};
+pub use reply::{extract_state, parse_authorization, parse_reply, verify_reply};
 pub use request::{access_request_eap, access_request_mab};

@@ -16,6 +16,13 @@ pub enum RadiusClientError {
     UnexpectedReplyCode(u8),
     /// An `Access-Challenge` carried no `EAP-Message` to relay.
     MissingEapMessage,
+    /// Asked to relay an empty EAP packet — there is nothing to send, and a
+    /// request with no `EAP-Message` and no `User-Name` is degenerate.
+    EmptyEapRelay,
+    /// An `Access-Accept` carried a VLAN (`Tunnel-Private-Group-ID`) without the
+    /// RFC 3580 `Tunnel-Type = VLAN(13)` / `Tunnel-Medium-Type = 802(6)` pair, or
+    /// with an empty group id. We refuse the assignment (fail closed).
+    MalformedVlanAssignment,
 }
 
 impl From<PacketError> for RadiusClientError {
@@ -36,6 +43,13 @@ impl core::fmt::Display for RadiusClientError {
             }
             Self::UnexpectedReplyCode(c) => write!(f, "unexpected RADIUS reply code {c}"),
             Self::MissingEapMessage => write!(f, "Access-Challenge carried no EAP-Message"),
+            Self::EmptyEapRelay => write!(f, "asked to relay an empty EAP packet"),
+            Self::MalformedVlanAssignment => {
+                write!(
+                    f,
+                    "VLAN assignment lacks Tunnel-Type=13/Tunnel-Medium-Type=6 or is empty"
+                )
+            }
         }
     }
 }
