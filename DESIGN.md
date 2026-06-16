@@ -162,7 +162,7 @@ Pure, I/O-free: driven by typed **events** (EAPOL frame in, RADIUS result in, ti
 
 | Operation | Module | Notes |
 |---|---|---|
-| RadSec TLS 1.3 (records, KDF, exporter) | **aws-lc-rs FIPS** via rustls | TLS 1.3 only; suite allow-list `TLS_AES_256_GCM_SHA384`, `TLS_AES_128_GCM_SHA256`; **key exchange = ML-KEM-1024 only** (FIPS 203; rustls `aws_lc_rs::kx_group::MLKEM1024`, no classical/hybrid groups); mutual auth (switch presents a NAS client cert; pins usg-radius server cert/CA). |
+| RadSec TLS 1.3 (records, KDF, exporter) | **aws-lc-rs FIPS** via rustls | TLS 1.3 only; **single suite `TLS_AES_256_GCM_SHA384`** (AES-256 only — a uniform 256-bit/SHA-384 posture, matching SERVER-CONTRACT §1.1); **key exchange = ML-KEM-1024 only** (FIPS 203; rustls `aws_lc_rs::kx_group::MLKEM1024`, no classical/hybrid groups); mutual auth (switch presents a NAS client cert; pins usg-radius server cert/CA). |
 | RADIUS `Message-Authenticator` (HMAC-MD5) | tolerated *inside* the RadSec tunnel | RFC 3579 mandates HMAC-**MD5**, which is **not** FIPS-approved. It is computed only as a RADIUS-protocol integrity field **inside** the TLS 1.3 FIPS tunnel, never as the security boundary. Documented as a protocol artifact, not a security claim — the tunnel is the boundary. |
 | Switch NAS client key | local key store / TPM (deployment-defined) | Used only for the RadSec TLS client cert. |
 
