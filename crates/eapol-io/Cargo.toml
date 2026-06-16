@@ -1,0 +1,36 @@
+[package]
+name = "eapol-io"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AF_PACKET raw-socket rx/tx of EAPOL (0x888E) on front-panel netdevs. The only crate with unsafe (confined FFI), wrapped in a safe async API."
+
+[dependencies]
+libc = "0.2"
+tokio = { version = "1", features = ["net"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net"] }
+
+# This crate intentionally does NOT inherit `[lints] workspace = true`: the
+# workspace FORBIDS unsafe, and this crate is the one place unsafe (AF_PACKET
+# FFI) is allowed. Every other security-baseline lint is kept; each unsafe block
+# carries a SAFETY justification (CONTRIBUTING.md).
+[lints.rust]
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+arithmetic_side_effects = "deny"

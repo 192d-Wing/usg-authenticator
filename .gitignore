@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock.orig
+.DS_Store
+# Local multi-root IDE workspace files
+*.code-workspace
+# Keep Cargo.lock for the binary/daemon crates (committed for reproducible FIPS builds)

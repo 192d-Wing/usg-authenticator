@@ -1,0 +1,19 @@
+[package]
+name = "enforce-sonic"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SONiC (SAI/swss) dataplane backend for the 802.1X authenticator: plans CONFIG_DB ops for port-auth/VLAN/ACL and the EAPOL trap, applied over a DbConn."
+
+[dependencies]
+enforce = { path = "../enforce" }
+pacp = { path = "../pacp" }
+pae = { path = "../pae" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[lints]
+workspace = true

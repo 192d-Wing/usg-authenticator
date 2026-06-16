@@ -1,0 +1,18 @@
+[package]
+name = "enforce"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Backend-neutral dataplane enforcement trait for the 802.1X authenticator: program port authorization, VLAN, and ACL. No I/O."
+
+[dependencies]
+pacp = { path = "../pacp" }
+pae = { path = "../pae" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[lints]
+workspace = true
