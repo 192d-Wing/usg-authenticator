@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      # The workspace path-depends on usg-radius's radius-proto crate (the 802.1X
+      # trio is developed as sibling checkouts), so fetch it alongside.
+      - name: Checkout usg-authenticator
+        uses: actions/checkout@v4
+        with:
+          path: usg-authenticator
+      - name: Checkout usg-radius (sibling, for radius-proto)
+        uses: actions/checkout@v4
+        with:
+          repository: 192d-Wing/usg-radius
+          path: usg-radius
+
+      # aws-lc-rs (RadSec crypto) builds its native module from source.
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: usg-authenticator
+
+      - name: Format check
+        working-directory: usg-authenticator
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        working-directory: usg-authenticator
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: usg-authenticator
+        run: cargo test --workspace
