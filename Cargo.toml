@@ -8,6 +8,7 @@ members = [
     "crates/enforce",
     "crates/enforce-sonic",
     "crates/eapol-io",
+    "crates/authd",
     "crates/kat",
 ]
 

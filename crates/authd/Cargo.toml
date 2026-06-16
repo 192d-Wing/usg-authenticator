@@ -1,0 +1,33 @@
+[package]
+name = "authd"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The 802.1X authenticator daemon: wires EAPOL (eapol-io) to the PAE, RADIUS (radius-client over radsec), and SONiC enforcement; owns the clock and per-session RADIUS correlation."
+
+[[bin]]
+name = "authd"
+path = "src/main.rs"
+
+[lib]
+name = "authd"
+path = "src/lib.rs"
+
+[dependencies]
+pacp = { path = "../pacp" }
+pae = { path = "../pae" }
+radius-client = { path = "../radius-client" }
+radsec = { path = "../radsec" }
+enforce = { path = "../enforce" }
+enforce-sonic = { path = "../enforce-sonic" }
+eapol-io = { path = "../eapol-io" }
+radius-proto = { path = "../../../usg-radius/crates/radius-proto", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "test-util"] }
+
+[lints]
+workspace = true
