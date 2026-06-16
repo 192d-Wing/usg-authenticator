@@ -39,7 +39,8 @@ pub enum PacpError {
         /// Octets actually available.
         available: usize,
     },
-    /// An EAP packet declared a length below the minimum for its code.
+    /// An EAP packet declared a length invalid for its code (< 5 for
+    /// Request/Response, or ≠ 4 for Success/Failure).
     EapTooShort {
         /// The EAP code (1=Request, 2=Response, 3=Success, 4=Failure).
         code: u8,

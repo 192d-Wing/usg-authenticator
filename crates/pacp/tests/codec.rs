@@ -258,12 +258,32 @@ fn eap_teap_type_recognized() {
 }
 
 #[test]
-fn eap_trailing_padding_ignored_by_length_field() {
-    // Declared length 5 but two extra padding octets present.
+fn eap_length_shorter_than_body_is_rejected() {
+    // The EAPOL layer hands EAP an exact, padding-free body, so a declared
+    // Length (5) shorter than the buffer (7) is a malformed frame, not padding —
+    // honoring it would silently truncate (and could corrupt) the User-Name.
     let body = from_hex("02010005 01 ffff").unwrap();
-    let eap = EapPacket::decode(&body).unwrap();
-    assert_eq!(eap.eap_type, Some(EapType::Identity));
-    assert_eq!(eap.identity(), Some(&[][..])); // padding excluded from type-data
+    assert!(matches!(
+        EapPacket::decode(&body),
+        Err(PacpError::EapLengthMismatch {
+            declared: 5,
+            available: 7
+        })
+    ));
+}
+
+#[test]
+fn eap_success_with_wrong_length_is_rejected() {
+    // RFC 3748 §4.2: Success/Failure Length MUST be 4. A 6-octet Success body
+    // declaring Length 6 matches the buffer but violates the code's fixed length.
+    let body = from_hex("0309 0006 aabb").unwrap();
+    assert!(matches!(
+        EapPacket::decode(&body),
+        Err(PacpError::EapTooShort {
+            code: 3,
+            declared: 6
+        })
+    ));
 }
 
 // ---- MAC formatting ----

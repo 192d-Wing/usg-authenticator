@@ -89,31 +89,23 @@ pub fn format_mac(mac: &MacAddr) -> String {
 /// # Errors
 /// - [`PacpError::TruncatedEthernet`] if fewer than [`HEADER_LEN`] octets exist.
 pub fn decode_frame(buf: &[u8]) -> Result<EthernetFrame<'_>, PacpError> {
-    let header_bytes = buf.get(..HEADER_LEN).ok_or(PacpError::TruncatedEthernet {
-        available: buf.len(),
-    })?;
-    // The slice is exactly HEADER_LEN; the array conversions below cannot fail,
-    // but we still avoid unwrap by supplying a default that is never reached.
-    let dst: MacAddr = header_bytes
-        .get(0..6)
-        .and_then(|s| MacAddr::try_from(s).ok())
-        .unwrap_or([0; 6]);
-    let src: MacAddr = header_bytes
-        .get(6..12)
-        .and_then(|s| MacAddr::try_from(s).ok())
-        .unwrap_or([0; 6]);
-    let ethertype = header_bytes
-        .get(12..14)
-        .and_then(|s| <[u8; 2]>::try_from(s).ok())
-        .map_or(0, u16::from_be_bytes);
+    // Destructure the fixed 14-octet header in one fallible step (the same idiom
+    // as `pdu`/`eap`): the array conversion is the bounds check, so there are no
+    // unreachable per-field defaults that could fail open to a zero MAC.
+    let [d0, d1, d2, d3, d4, d5, s0, s1, s2, s3, s4, s5, e0, e1] = buf
+        .get(..HEADER_LEN)
+        .and_then(|s| <[u8; HEADER_LEN]>::try_from(s).ok())
+        .ok_or(PacpError::TruncatedEthernet {
+            available: buf.len(),
+        })?;
 
     // `HEADER_LEN <= buf.len()` was just proven, so this slice is in-bounds.
     let payload = buf.get(HEADER_LEN..).unwrap_or(&[]);
     Ok(EthernetFrame {
         header: EthernetHeader {
-            dst,
-            src,
-            ethertype,
+            dst: [d0, d1, d2, d3, d4, d5],
+            src: [s0, s1, s2, s3, s4, s5],
+            ethertype: u16::from_be_bytes([e0, e1]),
         },
         payload,
     })

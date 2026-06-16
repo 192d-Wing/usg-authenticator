@@ -99,16 +99,23 @@ pub struct EapPacket<'a> {
 }
 
 impl<'a> EapPacket<'a> {
-    /// Decode an EAP packet from `buf` (an EAPOL-EAP body).
+    /// Decode an EAP packet from `buf`, **the exact EAPOL-EAP body**.
     ///
-    /// The EAP Length field is authoritative (RFC 3748 §4): octets beyond it are
-    /// ignored as padding, but a Length larger than the buffer, or smaller than
-    /// the minimum for the code, is an error.
+    /// The caller (the EAPOL layer) has already sliced the body to its
+    /// authoritative `Body Length`, stripping any Data-Link-Layer (Ethernet)
+    /// padding. So at this layer the buffer *is* the EAP packet, and the EAP
+    /// Length field (RFC 3748 §4) MUST equal the buffer length exactly:
+    /// - a Length **greater** than the buffer is a truncated/over-claimed packet;
+    /// - a Length **smaller** than the buffer means the EAPOL Body Length and the
+    ///   EAP Length disagree — a malformed frame. Silently honoring the short
+    ///   Length would drop trailing octets and could corrupt the derived
+    ///   `User-Name` (a RADIUS policy key), so we fail closed instead.
     ///
     /// # Errors
     /// - [`PacpError::TruncatedEapHeader`] if fewer than [`HEADER_LEN`] octets exist.
-    /// - [`PacpError::EapLengthMismatch`] if the Length field exceeds the buffer.
-    /// - [`PacpError::EapTooShort`] if the Length is below the minimum for the code.
+    /// - [`PacpError::EapLengthMismatch`] if the Length field ≠ the buffer length.
+    /// - [`PacpError::EapTooShort`] if the Length is invalid for the code
+    ///   (< 5 for Request/Response, ≠ 4 for Success/Failure).
     pub fn decode(buf: &'a [u8]) -> Result<Self, PacpError> {
         let [code_octet, identifier, len_hi, len_lo] = buf
             .get(..HEADER_LEN)
@@ -118,7 +125,7 @@ impl<'a> EapPacket<'a> {
             })?;
 
         let declared = usize::from(u16::from_be_bytes([len_hi, len_lo]));
-        if declared > buf.len() {
+        if declared != buf.len() {
             return Err(PacpError::EapLengthMismatch {
                 declared,
                 available: buf.len(),
@@ -126,38 +133,57 @@ impl<'a> EapPacket<'a> {
         }
 
         let code = EapCode::from_u8(code_octet);
-        if code.has_type() {
-            if declared < MIN_REQUEST_RESPONSE_LEN {
-                return Err(PacpError::EapTooShort {
-                    code: code_octet,
-                    declared,
-                });
+        match code {
+            EapCode::Request | EapCode::Response => {
+                if declared < MIN_REQUEST_RESPONSE_LEN {
+                    return Err(PacpError::EapTooShort {
+                        code: code_octet,
+                        declared,
+                    });
+                }
+                // Type octet sits at offset HEADER_LEN; type-data runs to
+                // `declared` (== buf.len()), so both slices are in-bounds.
+                let eap_type = buf.get(HEADER_LEN).copied().map(EapType::from_u8);
+                let type_data = buf
+                    .get(HEADER_LEN.saturating_add(1)..declared)
+                    .unwrap_or(&[]);
+                Ok(Self {
+                    code,
+                    identifier,
+                    eap_type,
+                    type_data,
+                })
             }
-            // Type octet sits at offset HEADER_LEN; type-data runs to `declared`.
-            let eap_type = buf.get(HEADER_LEN).copied().map(EapType::from_u8);
-            let type_data = buf
-                .get(HEADER_LEN.saturating_add(1)..declared)
-                .unwrap_or(&[]);
-            Ok(Self {
-                code,
-                identifier,
-                eap_type,
-                type_data,
-            })
-        } else {
-            // Success/Failure carry no type and, per RFC 3748, Length == 4.
-            if declared < HEADER_LEN {
-                return Err(PacpError::EapTooShort {
-                    code: code_octet,
-                    declared,
-                });
+            EapCode::Success | EapCode::Failure => {
+                // RFC 3748 §4.2: Success/Failure Length MUST be exactly 4.
+                if declared != HEADER_LEN {
+                    return Err(PacpError::EapTooShort {
+                        code: code_octet,
+                        declared,
+                    });
+                }
+                Ok(Self {
+                    code,
+                    identifier,
+                    eap_type: None,
+                    type_data: &[],
+                })
             }
-            Ok(Self {
-                code,
-                identifier,
-                eap_type: None,
-                type_data: &[],
-            })
+            EapCode::Unknown(_) => {
+                // No defined body shape; require at least the common header.
+                if declared < HEADER_LEN {
+                    return Err(PacpError::EapTooShort {
+                        code: code_octet,
+                        declared,
+                    });
+                }
+                Ok(Self {
+                    code,
+                    identifier,
+                    eap_type: None,
+                    type_data: &[],
+                })
+            }
         }
     }
 
