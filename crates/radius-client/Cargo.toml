@@ -1,0 +1,18 @@
+[package]
+name = "radius-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "EAP-over-RADIUS client for the 802.1X authenticator: builds Access-Request/Accounting, parses replies into PAE events. Reuses usg-radius radius-proto. Pure, no transport."
+
+[dependencies]
+# Reuse usg-radius's RADIUS codec verbatim so both ends share the wire format
+# (SERVER-CONTRACT.md §9). No transport features — RadSec/UDP live in `radsec`.
+radius-proto = { path = "../../../usg-radius/crates/radius-proto", default-features = false }
+pacp = { path = "../pacp" }
+pae = { path = "../pae" }
+
+[lints]
+workspace = true
