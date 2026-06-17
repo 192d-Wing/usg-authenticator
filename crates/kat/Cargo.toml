@@ -7,5 +7,10 @@ license.workspace = true
 authors.workspace = true
 description = "Shared known-answer-test vectors and hex helpers for usg-authenticator and usg-radius"
 
+[dev-dependencies]
+# Validate that this repo agrees, byte-for-byte, with the canonical KAT vectors
+# in the shared radius-proto codec (SERVER-CONTRACT §5 V-5).
+radius-proto = { path = "../../../usg-radius/crates/radius-proto", default-features = false }
+
 [lints]
 workspace = true

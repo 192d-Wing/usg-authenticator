@@ -85,4 +85,34 @@ mod tests {
         assert_eq!(from_hex("abc"), Err(HexError::OddLength));
         assert_eq!(from_hex("zz"), Err(HexError::BadDigit('z')));
     }
+
+    /// SERVER-CONTRACT §5 V-5: this repo agrees, byte-for-byte, with the canonical
+    /// KAT vectors in the shared `radius-proto` codec. The vectors live in
+    /// `radius_proto::kat` (both repos depend on that crate); here we decode them
+    /// with our own hex helper and confirm the shared builders/codec produce and
+    /// round-trip exactly those bytes.
+    #[test]
+    fn shared_vectors_match_radius_proto() {
+        use radius_proto::Packet;
+        use radius_proto::kat as rp;
+
+        type Builder = fn() -> Packet;
+        let cases: [(&str, Builder); 3] = [
+            (rp::VLAN_ACCESS_ACCEPT, rp::vlan_access_accept),
+            (rp::FILTER_ID_ACCESS_ACCEPT, rp::filter_id_access_accept),
+            (
+                rp::FRAGMENTED_EAP_ACCESS_REQUEST,
+                rp::fragmented_eap_access_request,
+            ),
+        ];
+        for (vector, build) in cases {
+            let bytes = from_hex(vector).unwrap();
+            // Our hex round-trips the published vector.
+            assert_eq!(to_hex(&bytes), vector);
+            // The shared builder encodes to exactly those bytes...
+            assert_eq!(build().encode().unwrap(), bytes);
+            // ...and the shared codec decodes + re-encodes back to them.
+            assert_eq!(Packet::decode(&bytes).unwrap().encode().unwrap(), bytes);
+        }
+    }
 }
