@@ -540,6 +540,9 @@ dependencies = [
 [[package]]
 name = "kat"
 version = "0.1.0"
+dependencies = [
+ "radius-proto",
+]
 
 [[package]]
 name = "libc"
